@@ -18,11 +18,11 @@ const PEAK_HOLD_FRAMES = 7;        // frames peak cap holds at peak top (~230ms)
 const PEAK_GRAVITY = 0.007;        // gravity acceleration per frame
 
 // ─── WinAmp Bar Dynamics ────────────────────────────────────────────────────
-const BAR_RISE_SPEED = 0.55;       // Fast attack (55% lerp to target per frame)
+const BAR_RISE_SPEED = 0.58;       // Fast attack (58% lerp to target per frame)
 const BAR_FALL_SPEED = 0.08;       // Smooth linear decay per frame
 
-// ─── Logarithmic 16-Band Spectral Envelope ──────────────────────────────────
-// Gives authentic WinAmp balance: Bass (3-5 dots), Mid (2-4 dots), Treble (1-3 dots)
+// ─── WinAmp 16-Band Spectral Envelope ───────────────────────────────────────
+// Calibrated logarithmic distribution: Bass (3-5.5 dots), Mid (2-4.5 dots), Treble (1-3 dots)
 const BASE_ENVELOPE = [
     0.50, 0.55, 0.58, 0.52,  // Sub-Bass & Bass (Bins 0-3)
     0.45, 0.42, 0.38, 0.35,  // Low-Mid & Mid (Bins 4-7)
@@ -172,10 +172,10 @@ class SpectrumVisualizer extends St.DrawingArea {
         this._startAnimation();
     }
 
-    // ─── Target Generation (Harmonic Wave & Spectral Beat Synthesis) ───
+    // ─── Target Generation (High-Fidelity Harmonic & Drum Envelope Synthesis) ───
 
     /**
-     * Start target cycle (updates every 100ms for smooth organic flow)
+     * Start target cycle (updates every 80ms for responsive rhythm)
      * @private
      */
     _startTargetCycle() {
@@ -190,7 +190,7 @@ class SpectrumVisualizer extends St.DrawingArea {
         };
         this._targetSourceId = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT,
-            100,
+            80,
             cycle,
         );
     }
@@ -207,47 +207,61 @@ class SpectrumVisualizer extends St.DrawingArea {
     }
 
     /**
-     * Generate target heights using harmonic wave synthesis & rhythmic beat pulses
+     * High-Fidelity Spectral Target Generator:
+     * - Exponential decay drum envelope simulation (Kick, Snare, Hi-Hat)
+     * - Prime harmonic wave synthesis (Melodic chord movement)
+     * - Logarithmic WinAmp envelope calibration & spatial bin correlation
      * @private
      */
     _generateTargets() {
         const t = Date.now() / 1000;
 
-        // Simulated Rhythm & Beat pulses
-        const isKickBeat = Math.sin(t * 7.0) > 0.82;   // ~115 BPM Kick Drum
-        const isSnareBeat = Math.cos(t * 3.5) > 0.88;  // Snare on 2 & 4
-        const isHiHat = Math.sin(t * 14.0) > 0.72;     // 16th-note Hi-Hat
+        // Exponential drum envelope pulses (~124 BPM)
+        const kickPeriod = 0.484;
+        const kickPhase = (t % kickPeriod) / kickPeriod;
+        const kickImpulse = Math.max(0, Math.exp(-kickPhase * 6.0));
+
+        const snarePeriod = 0.968;
+        const snarePhase = ((t + 0.242) % snarePeriod) / snarePeriod;
+        const snareImpulse = Math.max(0, Math.exp(-snarePhase * 5.0));
+
+        const hihatPeriod = 0.121;
+        const hihatPhase = (t % hihatPeriod) / hihatPeriod;
+        const hihatImpulse = Math.max(0, Math.exp(-hihatPhase * 8.0)) * (0.6 + 0.4 * Math.sin(t * 12.0));
 
         for (let i = 0; i < NUM_BARS; i++) {
             const base = BASE_ENVELOPE[i];
 
-            // Harmonic wave synthesis: Overlapping sine waves for fluid melody motion
-            const wave1 = 0.22 * Math.sin(t * 3.2 + i * 0.40);
-            const wave2 = 0.14 * Math.cos(t * 5.0 - i * 0.28);
-            const wave3 = 0.08 * Math.sin(t * 8.8 + i * 0.75);
+            // Harmonic wave synthesis: Overlapping sine waves at prime speeds
+            const wave1 = 0.18 * Math.sin(t * 2.8 + i * 0.45);
+            const wave2 = 0.12 * Math.cos(t * 4.6 - i * 0.32);
+            const wave3 = 0.08 * Math.sin(t * 7.4 + i * 0.85);
             const harmonicEnergy = wave1 + wave2 + wave3;
 
-            // Beat transient injection
-            let beatSpike = 0;
-            if (isKickBeat && i <= 3) {
-                beatSpike = 0.32 * (1.0 - i * 0.15);
-            } else if (isSnareBeat && i >= 5 && i <= 9) {
-                beatSpike = 0.26;
-            } else if (isHiHat && i >= 10) {
-                beatSpike = 0.20 * Math.random();
+            // Drum beat transient injection
+            let beat = 0;
+            if (i <= 3) {
+                // Kick drum punch on sub-bass & bass
+                beat = kickImpulse * 0.38 * (1.0 - i * 0.12);
+            } else if (i >= 5 && i <= 9) {
+                // Snare drum snap on mid-range
+                beat = snareImpulse * 0.28;
+            } else if (i >= 10) {
+                // Hi-hat shimmer on high presence & treble
+                beat = hihatImpulse * 0.22 * Math.random();
             }
 
             // Organic micro-flutter
-            const flutter = (Math.random() - 0.5) * 0.10;
+            const flutter = (Math.random() - 0.5) * 0.08;
 
-            let val = base + harmonicEnergy + beatSpike + flutter;
+            let val = base + harmonicEnergy + beat + flutter;
 
-            // Spatial smoothing across adjacent bins for realistic FFT spectral curve
+            // Spatial smoothing across adjacent bins for natural FFT spectral curve
             if (i > 0) {
-                val = val * 0.70 + this._barTargets[i - 1] * 0.30;
+                val = val * 0.72 + this._barTargets[i - 1] * 0.28;
             }
 
-            this._barTargets[i] = Math.max(0.12, Math.min(1.0, val));
+            this._barTargets[i] = Math.max(0.14, Math.min(1.0, val));
         }
     }
 
