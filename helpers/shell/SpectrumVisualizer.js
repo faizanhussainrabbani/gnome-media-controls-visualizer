@@ -1,6 +1,7 @@
 import Clutter from "gi://Clutter";
 import GObject from "gi://GObject";
 import GLib from "gi://GLib";
+import Gio from "gi://Gio";
 import St from "gi://St";
 import Cairo from "gi://cairo";
 
@@ -18,17 +19,8 @@ const PEAK_HOLD_FRAMES = 7;        // frames peak cap holds at peak top (~230ms)
 const PEAK_GRAVITY = 0.007;        // gravity acceleration per frame
 
 // ─── WinAmp Bar Dynamics ────────────────────────────────────────────────────
-const BAR_RISE_SPEED = 0.60;       // Snappy rise (60% lerp to target per frame)
-const BAR_FALL_SPEED = 0.09;       // Smooth linear decay
-
-// ─── WinAmp 16-Band Spectral Energy Profile (Logarithmic Frequency Curve) ───
-// Base energy envelope: Bass (3-5 dots), Mid (2-4 dots), Treble (1-3 dots)
-const BASE_ENVELOPE = [
-    0.52, 0.58, 0.62, 0.55,  // Sub-Bass & Bass (Bins 0-3)
-    0.48, 0.44, 0.40, 0.36,  // Low-Mid & Mid (Bins 4-7)
-    0.34, 0.32, 0.30, 0.28,  // Upper-Mid & Presence (Bins 8-11)
-    0.25, 0.22, 0.18, 0.14   // Brilliance & Treble (Bins 12-15)
-];
+const BAR_RISE_SPEED = 0.65;       // Fast attack (65% lerp to real FFT target per frame)
+const BAR_FALL_SPEED = 0.08;       // Smooth linear decay per frame
 
 /**
  * Attempt to get the foreground color from the theme.
@@ -54,10 +46,8 @@ function getThemeForegroundColor(widget) {
 class SpectrumVisualizer extends St.DrawingArea {
     /** @private @type {number[]} - Current bar heights (0–1) */
     _barHeights;
-    /** @private @type {number[]} - Target bar heights */
+    /** @private @type {number[]} - Real FFT target heights */
     _barTargets;
-    /** @private @type {number[]} - Per-bar fall velocity */
-    _barVelocity;
     /** @private @type {number[]} - Peak cap position (0–1) */
     _peakHeights;
     /** @private @type {number[]} - Peak cap velocity */
@@ -70,10 +60,10 @@ class SpectrumVisualizer extends St.DrawingArea {
     _isPlaying;
     /** @private @type {number | null} */
     _animSourceId;
-    /** @private @type {number | null} */
-    _targetSourceId;
-    /** @private @type {number} */
-    _frame;
+    /** @private @type {Gio.Subprocess | null} */
+    _helperProc;
+    /** @private @type {Gio.DataInputStream | null} */
+    _dataInputStream;
     /** @private @type {number} */
     _spectrumWidth;
 
@@ -94,15 +84,14 @@ class SpectrumVisualizer extends St.DrawingArea {
         this._spectrumWidth = width;
         this._barHeights = new Array(NUM_BARS).fill(0);
         this._barTargets = new Array(NUM_BARS).fill(0);
-        this._barVelocity = new Array(NUM_BARS).fill(0);
         this._peakHeights = new Array(NUM_BARS).fill(0);
         this._peakVelocity = new Array(NUM_BARS).fill(0);
         this._peakHoldCounter = new Array(NUM_BARS).fill(0);
         this._isAnimating = false;
         this._isPlaying = false;
         this._animSourceId = null;
-        this._targetSourceId = null;
-        this._frame = 0;
+        this._helperProc = null;
+        this._dataInputStream = null;
 
         this.connect("repaint", this._onRepaint.bind(this));
         this.connect("destroy", this._onDestroy.bind(this));
@@ -142,40 +131,133 @@ class SpectrumVisualizer extends St.DrawingArea {
     }
 
     /**
-     * Start animating (when playback is Playing)
+     * Start animating & launch real-time PipeWire FFT process
      * @public
      */
     start() {
         this._isPlaying = true;
-        this._generateTargets();
+        this._startHelperProcess();
         this._startAnimation();
-        this._startTargetCycle();
     }
 
     /**
-     * Pause animation (bars smoothly decay to low idle)
+     * Pause animation & stop helper process
      * @public
      */
     pause() {
         this._isPlaying = false;
-        this._stopTargetCycle();
+        this._stopHelperProcess();
         for (let i = 0; i < NUM_BARS; i++) {
-            this._barTargets[i] = 0.05;
+            this._barTargets[i] = 0;
         }
         this._startAnimation();
     }
 
     /**
-     * Stop animation entirely (bars go flat, peaks fall)
+     * Stop animation & kill helper process
      * @public
      */
     stop() {
         this._isPlaying = false;
-        this._stopTargetCycle();
+        this._stopHelperProcess();
         for (let i = 0; i < NUM_BARS; i++) {
             this._barTargets[i] = 0;
         }
         this._startAnimation();
+    }
+
+    // ─── PipeWire Real FFT Subprocess Integration ───────────────────────
+
+    /**
+     * Launch Python PipeWire FFT helper subprocess
+     * @private
+     */
+    _startHelperProcess() {
+        if (this._helperProc != null) return;
+
+        try {
+            const scriptPath = GLib.build_filenamev([
+                GLib.get_user_data_dir(),
+                "gnome-shell",
+                "extensions",
+                "mediacontrols@cliffniff.github.com",
+                "helpers",
+                "shell",
+                "spectrum_fft_helper.py"
+            ]);
+
+            this._helperProc = new Gio.Subprocess({
+                argv: ["/usr/bin/python3", scriptPath],
+                flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE,
+            });
+
+            this._helperProc.init(null);
+
+            const stdoutStream = this._helperProc.get_stdout_pipe();
+            this._dataInputStream = new Gio.DataInputStream({
+                base_stream: stdoutStream,
+            });
+
+            this._readNextFFTLine();
+        } catch (e) {
+            debugLog(`Failed to start PipeWire spectrum helper: ${e}`);
+            this._stopHelperProcess();
+        }
+    }
+
+    /**
+     * Asynchronously read next line of real FFT numbers from stdout
+     * @private
+     */
+    _readNextFFTLine() {
+        if (!this._dataInputStream || !this._isPlaying) return;
+
+        this._dataInputStream.read_line_async(
+            GLib.PRIORITY_DEFAULT,
+            null,
+            (stream, res) => {
+                try {
+                    const [line] = stream.read_line_finish_utf8(res);
+                    if (line !== null && line.length > 0) {
+                        const parts = line.split(",");
+                        if (parts.length >= NUM_BARS) {
+                            for (let i = 0; i < NUM_BARS; i++) {
+                                const val = parseFloat(parts[i]);
+                                if (!isNaN(val)) {
+                                    this._barTargets[i] = Math.max(0, Math.min(1.0, val));
+                                }
+                            }
+                        }
+                    }
+
+                    if (this._isPlaying && this._dataInputStream) {
+                        this._readNextFFTLine();
+                    }
+                } catch (_e) {
+                    // stream closed or error
+                }
+            }
+        );
+    }
+
+    /**
+     * Terminate PipeWire FFT helper process
+     * @private
+     */
+    _stopHelperProcess() {
+        if (this._dataInputStream) {
+            try {
+                this._dataInputStream.close(null);
+            } catch (_e) {}
+            this._dataInputStream = null;
+        }
+
+        if (this._helperProc) {
+            try {
+                this._helperProc.force_exit();
+            } catch (_e) {}
+            this._helperProc = null;
+        }
     }
 
     // ─── Animation Frame Loop ───────────────────────────────────────────
@@ -197,7 +279,6 @@ class SpectrumVisualizer extends St.DrawingArea {
                     return GLib.SOURCE_REMOVE;
                 }
 
-                this._frame++;
                 let allSettled = true;
 
                 for (let i = 0; i < NUM_BARS; i++) {
@@ -206,7 +287,7 @@ class SpectrumVisualizer extends St.DrawingArea {
 
                     // ─── Snappy WinAmp Bar Motion ───────────────
                     if (target > current) {
-                        // FAST ATTACK: Bar snaps up quickly to peak/beat
+                        // FAST ATTACK: Bar snaps up quickly to real FFT target
                         this._barHeights[i] += (target - current) * BAR_RISE_SPEED;
                     } else {
                         // DECAY: Smooth linear drop
@@ -270,99 +351,11 @@ class SpectrumVisualizer extends St.DrawingArea {
         }
     }
 
-    // ─── Target Generation (Harmonic Wave & Spectral Beat Synthesis) ───
-
-    /**
-     * Start the target-generation cycle (every ~120ms = ~8 updates/sec)
-     * @private
-     */
-    _startTargetCycle() {
-        this._stopTargetCycle();
-        const cycle = () => {
-            if (!this._isPlaying) {
-                this._targetSourceId = null;
-                return GLib.SOURCE_REMOVE;
-            }
-            this._generateTargets();
-            return GLib.SOURCE_CONTINUE;
-        };
-        this._targetSourceId = GLib.timeout_add(
-            GLib.PRIORITY_DEFAULT,
-            120,
-            cycle,
-        );
-    }
-
-    /**
-     * Stop the target-generation cycle
-     * @private
-     */
-    _stopTargetCycle() {
-        if (this._targetSourceId != null) {
-            GLib.source_remove(this._targetSourceId);
-            this._targetSourceId = null;
-        }
-    }
-
-    /**
-     * Generate target heights combining:
-     * 1. Logarithmic Base Frequency Envelope (Bass taller, Treble shorter)
-     * 2. Harmonic Wave Oscillations (Simulates musical notes & chords)
-     * 3. Rhythmic Beat Transients (Simulates kick drum & snare hits)
-     * 4. Micro-flutter (Organic analog noise)
-     * @private
-     */
-    _generateTargets() {
-        const t = Date.now() / 1000; // time in seconds
-
-        // Simulated Rhythm & Beat pulses
-        const isKickBeat = Math.sin(t * 7.5) > 0.82;   // ~120 BPM Kick Drum
-        const isSnareBeat = Math.cos(t * 3.75) > 0.88; // Snare on 2 & 4
-        const isHiHat = Math.sin(t * 15.0) > 0.70;    // 16th-note Hi-Hat flutter
-
-        for (let i = 0; i < NUM_BARS; i++) {
-            const base = BASE_ENVELOPE[i];
-
-            // Harmonic wave synthesis: Overlapping sine waves at musical frequencies
-            const wave1 = 0.25 * Math.sin(t * 3.0 + i * 0.45);
-            const wave2 = 0.15 * Math.cos(t * 5.2 - i * 0.30);
-            const wave3 = 0.10 * Math.sin(t * 9.1 + i * 0.80);
-            const harmonicEnergy = wave1 + wave2 + wave3;
-
-            // Beat transient injection
-            let beatSpike = 0;
-            if (isKickBeat && i <= 3) {
-                // Bass kick spike (brings bass bars up to 80%-100% height)
-                beatSpike = 0.35 * (1.0 - i * 0.15);
-            } else if (isSnareBeat && i >= 6 && i <= 10) {
-                // Snare drum spike in mid range
-                beatSpike = 0.30;
-            } else if (isHiHat && i >= 11) {
-                // Hi-hat shimmer in treble
-                beatSpike = 0.25 * Math.random();
-            }
-
-            // Organic micro-flutter
-            const flutter = (Math.random() - 0.5) * 0.12;
-
-            // Calculate final composite target
-            let val = base + harmonicEnergy + beatSpike + flutter;
-
-            // Spatial smoothing across adjacent bins for realistic FFT spectral curve
-            if (i > 0) {
-                val = val * 0.70 + this._barTargets[i - 1] * 0.30;
-            }
-
-            // Clamp to valid range (min 0.12 = 1 dot lit, max 1.0 = 6 dots lit)
-            this._barTargets[i] = Math.max(0.12, Math.min(1.0, val));
-        }
-    }
-
     // ─── Cairo Rendering ────────────────────────────────────────────────
 
     /**
      * Cairo repaint callback — draws the Stacked Pill / Dot Matrix LED VU meter
-     * with WinAmp-style floating peak caps.
+     * with WinAmp-style floating peak caps driven by Real FFT data.
      * @private
      * @param {St.DrawingArea} area
      */
@@ -445,10 +438,9 @@ class SpectrumVisualizer extends St.DrawingArea {
      */
     _onDestroy() {
         this._stopAnimation();
-        this._stopTargetCycle();
+        this._stopHelperProcess();
         this._barHeights = null;
         this._barTargets = null;
-        this._barVelocity = null;
         this._peakHeights = null;
         this._peakVelocity = null;
         this._peakHoldCounter = null;
