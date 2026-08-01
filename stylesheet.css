@@ -1,0 +1,142 @@
+.colored-icon {
+    -st-icon-style: requested;
+}
+
+.symbolic-icon {
+    -st-icon-style: symbolic;
+}
+
+.no-margin {
+    margin: 0;
+}
+
+.no-padding {
+    padding: 0;
+}
+
+.panel-button {
+    padding-left: 6px;
+    padding-right: 6px;
+}
+
+.panel-button-box > * {
+    padding-left: 6px;
+    padding-right: 6px;
+}
+
+.panel-button-box > *:last-child:not(.controls-box) {
+    padding-left: 6px;
+    padding-right: 6px;
+}
+
+.panel-controls-box {
+    padding-left: 0px;
+    padding-right: 0px;
+}
+
+.panel-controls-box > * {
+    padding-left: 6px;
+    padding-right: 6px;
+}
+
+.popup-menu-container {
+    padding: 14px 10px;
+}
+
+.popup-menu-box {
+    border-width: 0px;
+}
+
+.popup-menu-box > * {
+    margin-top: 8px;
+    margin-bottom: 8px;
+}
+
+.popup-menu-player-icons {
+    margin-top: 6px;
+    margin-bottom: 4px;
+    border-radius: 6px;
+}
+
+.popup-menu-player-icons-icon {
+    padding: 6px;
+    background-color: rgba(0, 0, 0, 0.125);
+    transition-property: background-color;
+    transition-duration: 200ms;
+}
+
+.popup-menu-player-icons-icon-last {
+    border-radius: 0px 6px 6px 0px;
+}
+
+.popup-menu-player-icons-icon-first {
+    border-radius: 6px 0px 0px 6px;
+}
+
+.popup-menu-player-icons-icon:hover {
+    background-color: rgba(160, 160, 160, 0.25);
+}
+
+.popup-menu-player-icons-icon-active {
+    background-color: rgba(160, 160, 160, 0.25);
+}
+
+.popup-menu-player-label {
+    font-size: small;
+    margin-right: 4px;
+    margin-left: 4px;
+}
+
+.popup-menu-label-title {
+    font-size: large;
+    font-weight: bold;
+    margin-bottom: 2px;
+}
+
+.popup-menu-controls-box {
+    margin-top: 10px;
+    margin-bottom: 4px;
+    padding-left: 0px;
+    padding-right: 0px;
+}
+
+.popup-menu-control-icon {
+    padding: 8px;
+    border-radius: 99px;
+    margin-left: 2px;
+    margin-right: 2px;
+    transition-property: background-color;
+    transition-duration: 150ms;
+}
+
+.popup-menu-control-icon:hover {
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+.popup-menu-control-icon-playpause {
+    padding: 10px;
+    background-color: rgba(255, 255, 255, 0.18);
+    border-radius: 99px;
+    margin-left: 6px;
+    margin-right: 6px;
+}
+
+.popup-menu-control-icon-playpause:hover {
+    background-color: rgba(255, 255, 255, 0.32);
+}
+
+.popup-menu-control-icon-active {
+    background-color: rgba(255, 255, 255, 0.18);
+    border-radius: 99px;
+}
+
+.popup-menu-control-icon-active:hover {
+    background-color: rgba(255, 255, 255, 0.3);
+}
+
+.popup-menu-spectrum {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    height: 30px;
+    min-height: 30px;
+}
