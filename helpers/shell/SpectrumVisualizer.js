@@ -12,49 +12,23 @@ const BAR_GAP = 3;
 const BAR_RADIUS = 2;
 const VISUALIZER_HEIGHT = 30;
 const ANIMATION_INTERVAL_MS = 33; // ~30 FPS
-const MIN_BAR_FRAC = 0.03; // minimum visible fraction when playing
 
 // ─── WinAmp Peak Cap Physics ────────────────────────────────────────────────
-const PEAK_HOLD_FRAMES = 8;        // frames the peak cap stays frozen at the top
-const PEAK_GRAVITY = 0.006;        // gravity acceleration per frame (WinAmp feel)
-const PEAK_CAP_HEIGHT = 2;         // pixel height of the floating peak cap
+const PEAK_HOLD_FRAMES = 7;        // frames peak cap holds at peak top (~230ms)
+const PEAK_GRAVITY = 0.007;        // gravity acceleration per frame
 
-// ─── Bar Rise / Fall Dynamics (WinAmp-accurate) ─────────────────────────────
-const BAR_RISE_SPEED = 0.55;       // fast attack (instant spike on beat)
-const BAR_FALL_SPEED = 0.08;       // slow decay (bars slide down smoothly)
-const BAR_FALL_ACCEL = 0.003;      // slight acceleration as bar falls
+// ─── WinAmp Bar Dynamics ────────────────────────────────────────────────────
+const BAR_RISE_SPEED = 0.60;       // Snappy rise (60% lerp to target per frame)
+const BAR_FALL_SPEED = 0.09;       // Smooth linear decay
 
-// ─── Logarithmic Musical Frequency Band Profiles ────────────────────────────
-// Each band maps to a musical frequency center (Hz) on a logarithmic scale.
-// WinAmp used ~20Hz to ~16kHz spread across its bars logarithmically.
-// Profile: [centerFreqHz, baseEnergy, variance, transientSensitivity]
-//   baseEnergy:     how energetic this band typically is (0.0–1.0)
-//   variance:       how much random variation this band has
-//   transientSens:  how reactive to sudden beat/drum spikes (0.0–1.0)
-const BAND_PROFILES = [
-    /* 0: Sub Bass    ~25Hz  */ { base: 0.55, variance: 0.30, transient: 0.90 },
-    /* 1: Sub Bass    ~40Hz  */ { base: 0.65, variance: 0.35, transient: 0.95 },
-    /* 2: Bass        ~63Hz  */ { base: 0.75, variance: 0.35, transient: 0.95 },
-    /* 3: Bass       ~100Hz  */ { base: 0.80, variance: 0.30, transient: 0.85 },
-    /* 4: Low Mid    ~160Hz  */ { base: 0.70, variance: 0.30, transient: 0.70 },
-    /* 5: Low Mid    ~250Hz  */ { base: 0.60, variance: 0.35, transient: 0.60 },
-    /* 6: Mid        ~400Hz  */ { base: 0.55, variance: 0.35, transient: 0.55 },
-    /* 7: Mid        ~630Hz  */ { base: 0.50, variance: 0.40, transient: 0.50 },
-    /* 8: Upper Mid   ~1kHz  */ { base: 0.48, variance: 0.40, transient: 0.50 },
-    /* 9: Upper Mid  ~1.6kHz */ { base: 0.45, variance: 0.40, transient: 0.55 },
-    /*10: Presence   ~2.5kHz */ { base: 0.50, variance: 0.35, transient: 0.65 },
-    /*11: Presence     ~4kHz */ { base: 0.45, variance: 0.30, transient: 0.60 },
-    /*12: Brilliance ~6.3kHz */ { base: 0.38, variance: 0.30, transient: 0.50 },
-    /*13: Brilliance  ~10kHz */ { base: 0.30, variance: 0.25, transient: 0.40 },
-    /*14: Air        ~12.5kHz*/ { base: 0.22, variance: 0.20, transient: 0.30 },
-    /*15: Air         ~16kHz */ { base: 0.15, variance: 0.15, transient: 0.25 },
+// ─── WinAmp 16-Band Spectral Energy Profile (Logarithmic Frequency Curve) ───
+// Base energy envelope: Bass (3-5 dots), Mid (2-4 dots), Treble (1-3 dots)
+const BASE_ENVELOPE = [
+    0.52, 0.58, 0.62, 0.55,  // Sub-Bass & Bass (Bins 0-3)
+    0.48, 0.44, 0.40, 0.36,  // Low-Mid & Mid (Bins 4-7)
+    0.34, 0.32, 0.30, 0.28,  // Upper-Mid & Presence (Bins 8-11)
+    0.25, 0.22, 0.18, 0.14   // Brilliance & Treble (Bins 12-15)
 ];
-
-// ─── Beat / Transient Simulation ────────────────────────────────────────────
-const BEAT_PROBABILITY = 0.12;      // chance of a "beat hit" per target cycle
-const BEAT_BOOST = 0.35;            // extra energy injected on a beat hit
-const BEAT_BASS_BIAS = 0.7;         // probability beat targets bass bands
-const TARGET_CYCLE_MS = 150;        // new targets every 150ms (WinAmp ~6-7 Hz)
 
 /**
  * Attempt to get the foreground color from the theme.
@@ -76,32 +50,17 @@ function getThemeForegroundColor(widget) {
     return [0.85, 0.85, 0.9];
 }
 
-/**
- * Apply dB-like logarithmic scaling to a linear amplitude (0–1).
- * This makes quiet sounds more visible and loud sounds hit hard without
- * clipping, matching WinAmp's perceptual loudness curve.
- * @param {number} linear - Linear amplitude in 0–1 range.
- * @returns {number} Perceptually scaled value in 0–1 range.
- */
-function dBScale(linear) {
-    if (linear <= 0) return 0;
-    // Map to a ~40dB range: 20*log10(linear) mapped to 0–1
-    // Using a softer curve: pow(linear, 0.55) approximates dB perception well
-    // for visualization without needing actual FFT amplitudes.
-    return Math.pow(linear, 0.55);
-}
-
 /** @extends St.DrawingArea */
 class SpectrumVisualizer extends St.DrawingArea {
     /** @private @type {number[]} - Current bar heights (0–1) */
     _barHeights;
     /** @private @type {number[]} - Target bar heights */
     _barTargets;
-    /** @private @type {number[]} - Per-bar fall velocity for smooth decay */
+    /** @private @type {number[]} - Per-bar fall velocity */
     _barVelocity;
     /** @private @type {number[]} - Peak cap position (0–1) */
     _peakHeights;
-    /** @private @type {number[]} - Peak cap velocity (falling speed) */
+    /** @private @type {number[]} - Peak cap velocity */
     _peakVelocity;
     /** @private @type {number[]} - Frames remaining in peak hold */
     _peakHoldCounter;
@@ -117,8 +76,6 @@ class SpectrumVisualizer extends St.DrawingArea {
     _frame;
     /** @private @type {number} */
     _spectrumWidth;
-    /** @private @type {number} - Global energy momentum for inter-beat coherence */
-    _globalEnergy;
 
     /**
      * @param {number} [width=200]
@@ -146,7 +103,6 @@ class SpectrumVisualizer extends St.DrawingArea {
         this._animSourceId = null;
         this._targetSourceId = null;
         this._frame = 0;
-        this._globalEnergy = 0.5;
 
         this.connect("repaint", this._onRepaint.bind(this));
         this.connect("destroy", this._onDestroy.bind(this));
@@ -191,7 +147,6 @@ class SpectrumVisualizer extends St.DrawingArea {
      */
     start() {
         this._isPlaying = true;
-        this._globalEnergy = 0.5;
         this._generateTargets();
         this._startAnimation();
         this._startTargetCycle();
@@ -204,9 +159,8 @@ class SpectrumVisualizer extends St.DrawingArea {
     pause() {
         this._isPlaying = false;
         this._stopTargetCycle();
-        // Set targets to near-zero so bars and peaks decay smoothly
         for (let i = 0; i < NUM_BARS; i++) {
-            this._barTargets[i] = MIN_BAR_FRAC + Math.random() * 0.02;
+            this._barTargets[i] = 0.05;
         }
         this._startAnimation();
     }
@@ -250,35 +204,31 @@ class SpectrumVisualizer extends St.DrawingArea {
                     const target = this._barTargets[i];
                     const current = this._barHeights[i];
 
-                    // ─── WinAmp Bar Rise/Fall Physics ───────────────
+                    // ─── Snappy WinAmp Bar Motion ───────────────
                     if (target > current) {
-                        // RISE: Fast attack — bar snaps up toward target
+                        // FAST ATTACK: Bar snaps up quickly to peak/beat
                         this._barHeights[i] += (target - current) * BAR_RISE_SPEED;
-                        this._barVelocity[i] = 0; // reset fall velocity on rise
                     } else {
-                        // FALL: Slow smooth decay with slight acceleration
-                        this._barVelocity[i] += BAR_FALL_ACCEL;
-                        this._barHeights[i] -= this._barVelocity[i] + BAR_FALL_SPEED * (current - target);
+                        // DECAY: Smooth linear drop
+                        this._barHeights[i] -= BAR_FALL_SPEED;
                         if (this._barHeights[i] < target) {
                             this._barHeights[i] = target;
-                            this._barVelocity[i] = 0;
                         }
                     }
 
-                    // Clamp
                     this._barHeights[i] = Math.max(0, Math.min(1, this._barHeights[i]));
 
                     // ─── WinAmp Floating Peak Cap Physics ───────────
-                    // If bar rises above peak, snap peak to bar top & reset hold
-                    if (this._barHeights[i] > this._peakHeights[i]) {
+                    if (this._barHeights[i] >= this._peakHeights[i]) {
+                        // Snap peak cap to bar top & reset hold timer
                         this._peakHeights[i] = this._barHeights[i];
                         this._peakVelocity[i] = 0;
                         this._peakHoldCounter[i] = PEAK_HOLD_FRAMES;
                     } else if (this._peakHoldCounter[i] > 0) {
-                        // Hold: peak cap stays frozen at top
+                        // Hold peak cap in mid-air
                         this._peakHoldCounter[i]--;
                     } else {
-                        // Fall: gravity pulls peak cap down
+                        // Gravity acceleration pulls peak cap down
                         this._peakVelocity[i] += PEAK_GRAVITY;
                         this._peakHeights[i] -= this._peakVelocity[i];
                         if (this._peakHeights[i] < this._barHeights[i]) {
@@ -287,11 +237,9 @@ class SpectrumVisualizer extends St.DrawingArea {
                         }
                     }
 
-                    // Clamp peak
                     this._peakHeights[i] = Math.max(0, Math.min(1, this._peakHeights[i]));
 
-                    // Check if settled
-                    if (Math.abs(this._barHeights[i] - target) > 0.002 ||
+                    if (Math.abs(this._barHeights[i] - target) > 0.005 ||
                         this._peakHeights[i] > target + 0.01) {
                         allSettled = false;
                     }
@@ -299,7 +247,6 @@ class SpectrumVisualizer extends St.DrawingArea {
 
                 this.queue_repaint();
 
-                // If not playing and everything settled, stop animation loop
                 if (!this._isPlaying && allSettled) {
                     this._isAnimating = false;
                     this._animSourceId = null;
@@ -323,10 +270,10 @@ class SpectrumVisualizer extends St.DrawingArea {
         }
     }
 
-    // ─── Target Generation (Simulated Frequency Analysis) ───────────────
+    // ─── Target Generation (Harmonic Wave & Spectral Beat Synthesis) ───
 
     /**
-     * Start the target-generation cycle that gives bars new random goals
+     * Start the target-generation cycle (every ~120ms = ~8 updates/sec)
      * @private
      */
     _startTargetCycle() {
@@ -341,7 +288,7 @@ class SpectrumVisualizer extends St.DrawingArea {
         };
         this._targetSourceId = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT,
-            TARGET_CYCLE_MS,
+            120,
             cycle,
         );
     }
@@ -358,64 +305,56 @@ class SpectrumVisualizer extends St.DrawingArea {
     }
 
     /**
-     * Generate new target heights using logarithmic musical frequency banding,
-     * dB-like perceptual scaling, and transient beat/drum spike simulation.
-     *
-     * This models WinAmp's spectrum analyzer behavior:
-     * - Bass bands (0-3) react strongly to kick drums
-     * - Mid bands (4-9) carry vocals and instruments
-     * - Treble bands (10-15) show hi-hats and cymbal shimmer
-     * - Random "beat hits" inject energy spikes into bass/snare bands
-     * - Global energy momentum provides inter-beat coherence
+     * Generate target heights combining:
+     * 1. Logarithmic Base Frequency Envelope (Bass taller, Treble shorter)
+     * 2. Harmonic Wave Oscillations (Simulates musical notes & chords)
+     * 3. Rhythmic Beat Transients (Simulates kick drum & snare hits)
+     * 4. Micro-flutter (Organic analog noise)
      * @private
      */
     _generateTargets() {
-        // ─── Global Energy Drift ────────────────────────────────────
-        // Slowly wander between 0.3 and 0.9 to simulate song dynamics
-        // (verse = quieter, chorus = louder)
-        this._globalEnergy += (Math.random() - 0.5) * 0.08;
-        this._globalEnergy = Math.max(0.30, Math.min(0.90, this._globalEnergy));
+        const t = Date.now() / 1000; // time in seconds
 
-        // ─── Beat / Transient Detection Simulation ──────────────────
-        const isBeat = Math.random() < BEAT_PROBABILITY;
-        // Determine which band range gets the beat emphasis
-        const beatIsBass = Math.random() < BEAT_BASS_BIAS; // kick drum vs snare
+        // Simulated Rhythm & Beat pulses
+        const isKickBeat = Math.sin(t * 7.5) > 0.82;   // ~120 BPM Kick Drum
+        const isSnareBeat = Math.cos(t * 3.75) > 0.88; // Snare on 2 & 4
+        const isHiHat = Math.sin(t * 15.0) > 0.70;    // 16th-note Hi-Hat flutter
 
         for (let i = 0; i < NUM_BARS; i++) {
-            const profile = BAND_PROFILES[i];
+            const base = BASE_ENVELOPE[i];
 
-            // Base energy for this band, modulated by global energy
-            let energy = profile.base * this._globalEnergy;
+            // Harmonic wave synthesis: Overlapping sine waves at musical frequencies
+            const wave1 = 0.25 * Math.sin(t * 3.0 + i * 0.45);
+            const wave2 = 0.15 * Math.cos(t * 5.2 - i * 0.30);
+            const wave3 = 0.10 * Math.sin(t * 9.1 + i * 0.80);
+            const harmonicEnergy = wave1 + wave2 + wave3;
 
-            // Add random variance
-            energy += (Math.random() - 0.3) * profile.variance;
-
-            // ─── Transient Beat Spike ───────────────────────────────
-            if (isBeat) {
-                if (beatIsBass && i <= 3) {
-                    // Kick drum: massive spike on sub-bass / bass bands
-                    energy += BEAT_BOOST * profile.transient * (1.0 + Math.random() * 0.3);
-                } else if (!beatIsBass && i >= 9 && i <= 12) {
-                    // Snare / hi-hat: spike on upper-mid / presence bands
-                    energy += BEAT_BOOST * profile.transient * (0.7 + Math.random() * 0.3);
-                } else {
-                    // Sympathetic energy from beat bleeds into neighboring bands
-                    energy += BEAT_BOOST * profile.transient * 0.15;
-                }
+            // Beat transient injection
+            let beatSpike = 0;
+            if (isKickBeat && i <= 3) {
+                // Bass kick spike (brings bass bars up to 80%-100% height)
+                beatSpike = 0.35 * (1.0 - i * 0.15);
+            } else if (isSnareBeat && i >= 6 && i <= 10) {
+                // Snare drum spike in mid range
+                beatSpike = 0.30;
+            } else if (isHiHat && i >= 11) {
+                // Hi-hat shimmer in treble
+                beatSpike = 0.25 * Math.random();
             }
 
-            // ─── Neighbor Smoothing (Adjacent Band Correlation) ─────
-            // Real FFT output has correlated neighboring bins.
-            // Blend slightly with previous bar's target for natural flow.
+            // Organic micro-flutter
+            const flutter = (Math.random() - 0.5) * 0.12;
+
+            // Calculate final composite target
+            let val = base + harmonicEnergy + beatSpike + flutter;
+
+            // Spatial smoothing across adjacent bins for realistic FFT spectral curve
             if (i > 0) {
-                energy = energy * 0.75 + this._barTargets[i - 1] * 0.25;
+                val = val * 0.70 + this._barTargets[i - 1] * 0.30;
             }
 
-            // ─── dB Logarithmic Perceptual Scaling ──────────────────
-            energy = dBScale(Math.max(0, Math.min(1, energy)));
-
-            // Clamp to valid range
-            this._barTargets[i] = Math.max(MIN_BAR_FRAC, Math.min(1.0, energy));
+            // Clamp to valid range (min 0.12 = 1 dot lit, max 1.0 = 6 dots lit)
+            this._barTargets[i] = Math.max(0.12, Math.min(1.0, val));
         }
     }
 
@@ -447,30 +386,28 @@ class SpectrumVisualizer extends St.DrawingArea {
             const activeRatio = this._barHeights[col]; // 0.0 to 1.0
             const activeDots = Math.round(activeRatio * DOTS_PER_COL);
             const peakRatio = this._peakHeights[col];
-            const peakDot = Math.round(peakRatio * DOTS_PER_COL) - 1; // 0-indexed dot for peak
+            const peakDot = Math.round(peakRatio * DOTS_PER_COL) - 1;
 
             const x = col * (barWidth + BAR_GAP);
 
             for (let dot = 0; dot < DOTS_PER_COL; dot++) {
-                // dot 0 is bottom, dot DOTS_PER_COL - 1 is top
                 const y = areaHeight - (dot + 1) * dotHeight - dot * DOT_GAP;
 
                 this._drawPill(cr, x, y, barWidth, dotHeight, Math.min(BAR_RADIUS, dotHeight / 2));
 
                 const isLit = dot < activeDots || (dot === 0 && activeRatio > 0.02);
-                const isPeakCap = (dot === peakDot) && peakRatio > 0.05 && dot >= activeDots;
+                const isPeakCap = (dot === peakDot) && peakRatio > 0.08 && dot >= activeDots;
 
                 if (isPeakCap) {
-                    // ─── WinAmp Floating Peak Cap ───────────────────
-                    // Bright, distinct peak indicator dot
+                    // WinAmp Floating Peak Cap (Bright highlighted top dot)
                     cr.setSourceRGBA(r, g, b, 0.95);
                 } else if (isLit) {
-                    // ─── Lit LED Dot (VU meter gradient) ────────────
+                    // Lit LED Dot (Graduated VU brightness)
                     const dotLevel = (dot + 1) / DOTS_PER_COL;
-                    const alpha = 0.45 + dotLevel * 0.50; // 0.45 → 0.95
+                    const alpha = 0.50 + dotLevel * 0.45; // 0.50 → 0.95
                     cr.setSourceRGBA(r, g, b, alpha);
                 } else {
-                    // ─── Unlit LED Matrix Dot ───────────────────────
+                    // Unlit LED Matrix Dot
                     cr.setSourceRGBA(r, g, b, 0.06);
                 }
                 cr.fill();
